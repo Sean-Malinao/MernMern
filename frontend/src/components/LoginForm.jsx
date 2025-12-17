@@ -1,20 +1,37 @@
 import React, { useState } from 'react';
+import axios from 'axios';
+import { useNavigate } from 'react-router-dom';
 
 export default function LoginForm({ onSwitchToSignup, onSwitchToForgot }) {
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setError('');
     setIsLoading(true);
 
-    // Simulate API call
-    setTimeout(() => {
-      console.log('Login attempt:', { email, password });
+    try {
+      const response = await axios.post('http://localhost:5000/api/auth/login', {
+        email,
+        password
+      });
+
+      // Save token and user data
+      localStorage.setItem('token', response.data.data.token);
+      localStorage.setItem('user', JSON.stringify(response.data.data.user));
+
+      // Redirect to home
+      navigate('/home');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Login failed');
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   return (
@@ -26,6 +43,13 @@ export default function LoginForm({ onSwitchToSignup, onSwitchToForgot }) {
             <h1 className="text-3xl font-bold text-gray-900">Welcome back</h1>
             <p className="text-gray-500">Sign in to continue</p>
           </div>
+
+          {/* Error Message */}
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-xl p-4">
+              <p className="text-red-600 text-sm">{error}</p>
+            </div>
+          )}
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -53,7 +77,7 @@ export default function LoginForm({ onSwitchToSignup, onSwitchToForgot }) {
                 </label>
                 <button
                   type="button"
-                  onClick={onSwitchToForgot}
+                  onClick={() => navigate('/forgot-password')}
                   className="text-sm text-gray-600 hover:text-gray-900 transition-colors"
                 >
                   Forgot?
@@ -134,7 +158,7 @@ export default function LoginForm({ onSwitchToSignup, onSwitchToForgot }) {
           {/* Sign Up Link */}
           <p className="text-center text-sm text-gray-600">
             Don't have an account?{' '}
-            <button type="button" onClick={onSwitchToSignup} className="font-medium text-gray-900 hover:underline">
+            <button type="button" onClick={() => navigate('/signup')} className="font-medium text-gray-900 hover:underline">
               Sign up
             </button>
           </p>
