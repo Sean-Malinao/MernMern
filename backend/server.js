@@ -2,7 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
-import authRoutes from './routes/auth.js';
+import authRoutes from './routes/auth.js'
+import voterAuthRoutes from './routes/voterAuth.js';
 
 // Load environment variables
 dotenv.config();
@@ -19,6 +20,7 @@ console.log('JWT_SECRET exists:', !!process.env.JWT_SECRET);
 console.log('EMAIL_USER:', process.env.EMAIL_USER);
 console.log('EMAIL_PASSWORD exists:', !!process.env.EMAIL_PASSWORD);
 console.log('===============================================\n');
+console.log('🔍 JWT_SECRET from .env:', process.env.JWT_SECRET ? '[HIDDEN]' : '❌ MISSING');
 
 // =====================
 // Middleware
@@ -35,6 +37,7 @@ app.use(cors({
 // Body parser
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use('/api/voter', voterAuthRoutes);
 
 // =====================
 // MongoDB Connection

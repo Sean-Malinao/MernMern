@@ -1,69 +1,34 @@
-import React, { useState } from 'react'
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom'
-import './App.css'
-import './index.css'
-import LoginForm from './components/LoginForm'
-import SignupForm from './components/SignupForm'
-import ForgotPassword from './components/ForgotPassword'
-import OTPVerification from './components/OTPVerification'
-import HomePage from './components/HomePage'
-import ProtectedRoute from './components/ProtectedRoute'
+// frontend/src/App.jsx
+import React from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import './App.css';
+import './index.css';
+
+// Auth Components
+import LoginForm from './components/LoginForm';
+import SignupForm from './components/SignupForm';
+import ForgotPassword from './components/ForgotPassword';
+import OTPVerification from './components/OTPVerification';
+
+// Page Components
+import LandingPage from './components/LandingPage';      // NEW
+import HomePage from './components/HomePage';          // Your current authenticated dashboard
+import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
-  const [view, setView] = useState('login')
-  const [signupEmail, setSignupEmail] = useState('')
-
-  const handleShowOTPVerification = (email) => {
-    setSignupEmail(email)
-    setView('otp')
-  }
-
-  const handleVerificationSuccess = (data) => {
-    setView('home')
-  }
-
-  const handleResendOTP = () => {
-    // OTP was resent
-  }
-
   return (
     <Router>
       <Routes>
-        {/* Auth Routes */}
-        <Route
-          path="/login"
-          element={
-            <LoginForm
-              onSwitchToSignup={() => setView('signup')}
-              onSwitchToForgot={() => setView('forgot')}
-            />
-          }
-        />
-        <Route
-          path="/signup"
-          element={
-            <SignupForm
-              onSwitchToLogin={() => setView('login')}
-              onShowOTPVerification={handleShowOTPVerification}
-            />
-          }
-        />
-        <Route
-          path="/forgot-password"
-          element={<ForgotPassword onBack={() => setView('login')} />}
-        />
-        <Route
-          path="/verify-otp"
-          element={
-            <OTPVerification
-              email={signupEmail}
-              onVerificationSuccess={handleVerificationSuccess}
-              onResendOTP={handleResendOTP}
-            />
-          }
-        />
+        {/* Public Landing Page */}
+        <Route path="/" element={<LandingPage />} />
 
-        {/* Protected Routes */}
+        {/* Auth Routes */}
+        <Route path="/login" element={<LoginForm />} />
+        <Route path="/signup" element={<SignupForm />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/verify-otp" element={<OTPVerification />} />
+
+        {/* Protected Voter Dashboard */}
         <Route
           path="/home"
           element={
@@ -73,12 +38,15 @@ function App() {
           }
         />
 
-        {/* Default Redirect */}
-        <Route path="/" element={<Navigate to="/login" replace />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        {/* Optional: Public Election Dashboard (read-only) */}
+        {/* We'll build this later if needed */}
+        {/* <Route path="/dashboard" element={<PublicDashboard />} /> */}
+
+        {/* Fallback: redirect unknown routes to landing */}
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
     </Router>
-  )
+  );
 }
 
-export default App
+export default App;

@@ -264,7 +264,11 @@ export const verifyOTP = async (req, res) => {
     user.otp = undefined;
     await user.save();
 
-    const token = generateToken(user._id);
+    const token = jwt.sign(
+      { id: user._id, role: 'admin' },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
     console.log('✅ [VERIFY OTP] Verification complete');
 
     res.status(200).json({
