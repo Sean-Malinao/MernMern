@@ -13,6 +13,7 @@ import OTPVerification from './components/OTPVerification';
 // Page Components
 import LandingPage from './components/LandingPage';      // NEW
 import HomePage from './components/HomePage';          // Your current authenticated dashboard
+import VoterDashboard from './components/VoterDashboard'; // NEW
 import ProtectedRoute from './components/ProtectedRoute';
 
 function App() {
@@ -27,13 +28,14 @@ function App() {
         <Route path="/signup" element={<SignupForm />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/verify-otp" element={<OTPVerification />} />
+        
 
         {/* Protected Voter Dashboard */}
         <Route
           path="/home"
           element={
             <ProtectedRoute>
-              <HomePage />
+              <VoterDashboard />
             </ProtectedRoute>
           }
         />
