@@ -55,7 +55,7 @@ const VoterDashboard = () => {
       console.error('Chat error:', err);
       setMessages(prev => [...prev, { 
         sender: 'ai', 
-        text: 'Sorry, I’m offline right now. Please try again later.' 
+        text: 'Sorry, I\m offline right now. Please try again later.' 
       }]);
     } finally {
       setIsLoading(false);
@@ -86,6 +86,13 @@ const VoterDashboard = () => {
     setLoading(false);
   }, [navigate]);
 
+  // ===== HANDLE CAST VOTE BUTTON =====
+  const handleCastVote = () => {
+    // Navigate to election selection page (use existing protected route '/elections')
+    // pass the voter's eligibility so ElectionSelection can pre-filter available ballots
+    navigate('/elections', { state: { eligibility: voter?.eligibility } });
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-amber-50">
@@ -105,10 +112,8 @@ const VoterDashboard = () => {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-gray-50 to-blue-50 p-4">
-      {/* ===== TOP HEADER (Figma-style) ===== */}
       <header className="bg-white border-b border-gray-200 shadow-sm mb-8">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          {/* Left: Logo + Title */}
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-full border-2 border-blue-900 overflow-hidden">
               <img
@@ -153,10 +158,9 @@ const VoterDashboard = () => {
         </div>
       </header>
 
-      {/* ===== BLUE BANNER (as before) ===== */}
+      {/* ===== BLUE BANNER ===== */}
       <div className="max-w-7xl mx-auto mb-8">
         <div className="bg-gradient-to-r from-blue-900 to-indigo-800 rounded-3xl p-8 text-white shadow-xl relative overflow-hidden">
-          {/* Decorative dots */}
           <div className="absolute top-4 right-4 w-2 h-2 bg-white rounded-full opacity-30"></div>
           <div className="absolute top-8 right-8 w-1 h-1 bg-white rounded-full opacity-20"></div>
           <div className="absolute bottom-6 left-6 w-3 h-3 bg-white rounded-full opacity-40"></div>
@@ -172,7 +176,7 @@ const VoterDashboard = () => {
               <div className="mt-6">
                 <button
                   disabled={hasVoted}
-                  onClick={() => navigate('/vote')}
+                  onClick={handleCastVote}
                   className={`px-8 py-4 rounded-xl font-bold text-lg flex items-center justify-center space-x-2 transition-all transform hover:scale-[1.02] ${
                     hasVoted
                       ? 'bg-gray-400 text-gray-200 cursor-not-allowed'

@@ -15,6 +15,11 @@ const voterSchema = new mongoose.Schema({
     lowercase: true,
     match: [/^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/, 'Invalid email']
   },
+  password: {
+    type: String,
+    required: true,
+    minlength: 6
+  },
   dob: { 
     type: String, 
     required: true,

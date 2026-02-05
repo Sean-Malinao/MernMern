@@ -3,6 +3,7 @@ import express from 'express';
 import { voterLogin } from '../controllers/voterAuthController.js';
 import { authMiddleware } from '../middleware/authMiddleware.js';
 import Voter from '../models/Voter.js';
+import bcrypt from 'bcryptjs';
 
 const router = express.Router();
 
@@ -16,10 +17,21 @@ router.get('/me', authMiddleware, (req, res) => {
 
 // TEMPORARY: Add voter (for testing only)
 router.post('/add-voter', async (req, res) => {
-  const { voterId, dob, email } = req.body;
+  const { voterId, dob, email, password } = req.body;
 
-  if (!voterId || !dob) {
-    return res.status(400).json({ message: 'voterId and dob are required' });
+  if (!voterId || !dob || !password) {
+    return res.status(400).json({ message: 'voterId, dob, and password are required' });
+  }
+
+  // Validate password strength
+  if (password.length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+  }
+  
+  // Check for at least one special character
+  const specialCharRegex = /[!@#$%^&*()_+\-=\[\]{}|;:'",.<>?/~`]/;
+  if (!specialCharRegex.test(password)) {
+    return res.status(400).json({ message: 'Password must contain at least 1 special character (!@#$%^&* etc.)' });
   }
 
   // Parse dob and convert to YYYYMMDD format
@@ -52,12 +64,22 @@ router.post('/add-voter', async (req, res) => {
   const eligibility = age >= 18 ? 'barangay' : 'sk';
 
   try {
-    const voter = new Voter({ voterId, dob: dobStr, age, eligibility, email });
+    // Hash the password
+    const hashedPassword = await bcrypt.hash(password, 10);
+    
+    const voter = new Voter({ voterId, dob: dobStr, age, eligibility, email, password: hashedPassword });
     await voter.save();
-    res.status(201).json({ message: 'Voter added!', voter });
+    res.status(201).json({ message: 'Voter added!', voter: { voterId, email, age, eligibility } });
   } catch (err) {
     if (err.code === 11000) {
-      return res.status(400).json({ message: 'Voter ID already exists' });
+      // Determine which field caused the duplicate error
+      const field = Object.keys(err.keyPattern)[0];
+      if (field === 'email') {
+        return res.status(400).json({ message: 'This email is already taken' });
+      } else if (field === 'voterId') {
+        return res.status(400).json({ message: 'This Voter ID already exists' });
+      }
+      return res.status(400).json({ message: 'Voter ID or email already exists' });
     }
     console.error(err);
     res.status(500).json({ message: 'Server error' });

@@ -1,24 +1,62 @@
 // frontend/src/components/LoginForm.jsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
 const LoginForm = () => {
   const navigate = useNavigate();
   const [voterId, setVoterId] = useState('');
-  const [secretPassword, setSecretPassword] = useState('');
+  const [password, setPassword] = useState('');
+  const [captchaAnswer, setCaptchaAnswer] = useState('');
+  const [captchaError, setCaptchaError] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [captcha, setCaptcha] = useState({
+    num1: 0,
+    num2: 0,
+    operation: '+',
+    correctAnswer: 0,
+    question: ''
+  });
+
+  // Generate random CAPTCHA on component mount
+  useEffect(() => {
+    generateNewCaptcha();
+  }, []);
+
+  const generateNewCaptcha = () => {
+    const num1 = Math.floor(Math.random() * 100) + 1; // 1-100 (high number)
+    const num2 = Math.floor(Math.random() * 10) + 1; // 1-10 (low number)
+    const operation = '+';
+    const correctAnswer = num1 + num2;
+
+    setCaptcha({
+      num1,
+      num2,
+      operation,
+      correctAnswer,
+      question: `${num1} ${operation} ${num2} = ?`
+    });
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setCaptchaError('');
+    
+    // Validate CAPTCHA
+    if (captchaAnswer.trim() !== String(captcha.correctAnswer)) {
+      setCaptchaError(`Incorrect answer. ${captcha.question.split('=')[0].trim()} = ${captcha.correctAnswer}`);
+      setCaptchaAnswer('');
+      return;
+    }
+    
     setIsLoading(true);
 
     try {
       const response = await axios.post('http://localhost:5000/api/voter/login', {
         voterId,
-        secretPassword // expected: YYYYMMDD (8 digits)
+        password
       });
 
       localStorage.setItem('token', response.data.token);
@@ -27,7 +65,7 @@ const LoginForm = () => {
     } catch (err) {
       setError(
         err.response?.data?.message ||
-        'Login failed. Please check your Voter ID and Secret Password.'
+        'Login failed. Please check your Voter ID and password.'
       );
     } finally {
       setIsLoading(false);
@@ -117,7 +155,7 @@ const LoginForm = () => {
 
             <div className="px-6 py-4 bg-gray-50 border-b border-gray-100">
               <p className="text-xs text-gray-700 leading-relaxed text-center">
-                Welcome! Please enter your official Voter ID and Secret Password provided by the admin.  
+                Welcome! Please enter your official Voter ID and password provided by the admin.  
                 Sangguniang Kabataan (SK) voters are ages <span className="font-medium">15–30</span>, while Barangay voters are <span className="font-medium">18 and above</span>.  
                 Ensure your eligibility before logging in.
               </p>
@@ -148,10 +186,10 @@ const LoginForm = () => {
                 </div>
               </div>
 
-              {/* Secret Password */}
+              {/* Password */}
               <div>
-                <label htmlFor="secretPassword" className="block text-sm font-medium text-gray-700 mb-2">
-                  Secret Password
+                <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-2">
+                  Password
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -160,22 +198,38 @@ const LoginForm = () => {
                     </svg>
                   </div>
                   <input
-                    id="secretPassword"
+                    id="password"
                     type="password"
-                    value={secretPassword}
-                    onChange={(e) => setSecretPassword(e.target.value.replace(/\D/g, '').substring(0, 8))}
-                    placeholder="Enter your unique secret password (e.g., 20000101)"
-                    maxLength="8"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter your password"
                     required
                     className="w-full pl-10 pr-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition"
                   />
-                  <div className="absolute inset-y-0 right-0 pr-3 flex items-center">
-                    <span className="text-xs text-gray-500">YYYYMMDD</span>
-                  </div>
                 </div>
-                <p className="mt-2 text-xs text-gray-500">
-                  Hint: Your Secret Password is your Date of Birth in <span className="font-mono">YYYYMMDD</span> format.
-                </p>
+              </div>
+
+              {/* CAPTCHA Verification */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <p className="text-sm font-semibold text-gray-800 mb-3">Verify you are human:</p>
+                <div className="bg-white border border-gray-300 rounded-lg p-3 mb-3">
+                  <p className="text-center text-lg font-bold text-blue-900">{captcha.question}</p>
+                </div>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={captchaAnswer}
+                    onChange={(e) => {
+                      setCaptchaAnswer(e.target.value);
+                      setCaptchaError('');
+                    }}
+                    placeholder="Enter your answer"
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition text-center text-lg font-semibold"
+                  />
+                </div>
+                {captchaError && (
+                  <p className="text-red-600 text-sm mt-2 text-center">{captchaError}</p>
+                )}
               </div>
 
               {/* Error */}

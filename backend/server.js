@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
 import voterAuthRoutes from './routes/voterAuth.js';
+import electionsRoutes from './routes/elections.js';
 
 // Load environment variables
 dotenv.config();
@@ -56,6 +57,7 @@ connectDB();
 // =====================
 
 app.use('/api/voter', voterAuthRoutes);
+app.use('/api/elections', electionsRoutes);
 
 app.get('/api/health', (req, res) => {
   res.status(200).json({ message: 'Server is running' });

@@ -15,6 +15,8 @@ import LandingPage from './components/LandingPage';      // NEW
 import HomePage from './components/HomePage';          // Your current authenticated dashboard
 import VoterDashboard from './components/VoterDashboard'; // NEW
 import ProtectedRoute from './components/ProtectedRoute';
+import ElectionSelection from './components/ElectionSelection';
+import Ballot from './components/Ballot';
 
 function App() {
   return (
@@ -36,6 +38,25 @@ function App() {
           element={
             <ProtectedRoute>
               <VoterDashboard />
+            </ProtectedRoute>
+          }
+        />
+        {/* Election Selection */}
+        <Route
+          path="/elections"
+          element={
+            <ProtectedRoute>
+              <ElectionSelection />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Ballot Page */}
+        <Route
+          path="/ballot/:electionId"
+          element={
+            <ProtectedRoute>
+              <Ballot />
             </ProtectedRoute>
           }
         />
