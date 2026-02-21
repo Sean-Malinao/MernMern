@@ -1,0 +1,591 @@
+"""Main FastAPI application for Mayombo AI Assistant"""
+
+import random
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from config import CORS_ORIGINS, APP_TITLE, APP_VERSION
+from responses import RESPONSES
+from nlp_utils import (
+    detect_intent, detect_vibe, detect_language,
+    apply_vibe_to_response, clean_response,
+    add_conversational_flair, apply_conversational_logic
+)
+from candidate_manager import CandidateManager
+from session_manager import SessionManager
+
+
+# Initialize FastAPI app
+app = FastAPI(title=APP_TITLE)
+
+# Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5174",
+        "http://127.0.0.1:5174"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# === CONVERSATIONAL MEMORY (Simulates ML context awareness) ===
+# In-memory session storage (lightweight - resets on server restart)
+USER_SESSIONS = {}  # {user_ip: {"history": [msg1, msg2], "last_intent": "...", "last_position": "..."}}
+
+def get_user_session(request: Request) -> dict:
+    """Get or create session for user (identified by IP)"""
+    user_ip = request.client.host
+    if user_ip not in USER_SESSIONS:
+        USER_SESSIONS[user_ip] = {"history": [], "last_intent": None, "last_position": None}
+    return USER_SESSIONS[user_ip]
+
+def update_session(session: dict, message: str, intent: str, position: str = None):
+    """Update session with new message and context"""
+    session["history"].append(message.lower())
+    if len(session["history"]) > 3:  # Keep last 3 messages only
+        session["history"].pop(0)
+    session["last_intent"] = intent
+    if position:
+        session["last_position"] = position
+
+# === VIBE DETECTION (English + Tagalog) ===
+VIBE_KEYWORDS = {
+    "english": {
+        "positive": ["thank", "awesome", "nice", "cool", "love", "helpful", "smooth", "perfect", "great", "amazing", "thanks", "salamat"],
+        "negative": ["don't get", "hard", "error", "why", "damn", "annoying", "broken", "frustrating", "help me", "can't find", "stupid", "worst", "nakakainis", "hirap", "galit"]
+    },
+    "tagalog": {
+        "positive": ["salamat", "ganda", "galing", "aliw", "smooth", "perpekto", "magaling", "sarap", "saya", "thank you", "thanks"],
+        "negative": ["hindi ko", "hirap", "error", "bakit", "puta", "bwiset", "sira", "nakakainis", "tulong", "di ko", "galit", "stress", "annoying", "frustrating"]
+    }
+}
+
+def detect_vibe(message: str, language: str) -> str:
+    """Lightweight vibe detection using keywords"""
+    msg_lower = message.lower()
+    lang_kw = VIBE_KEYWORDS.get(language, VIBE_KEYWORDS["english"])
+    
+    for kw in lang_kw["negative"]:
+        if kw in msg_lower:
+            return "negative"
+    
+    for kw in lang_kw["positive"]:
+        if kw in msg_lower:
+            return "positive"
+    
+    return "neutral"
+
+def apply_vibe_to_response(reply: str, vibe: str, language: str) -> str:
+    """Add vibe-appropriate touches WITHOUT changing factual content"""
+    if vibe == "positive":
+        closings = {
+            "english": "\n\n✨ Happy to help! Your vote matters! 🗳️",
+            "tagalog": "\n\n✨ Masaya kaming makatulong! Mahalaga ang boto mo! 🗳️"
+        }
+        return reply + closings.get(language, closings["english"])
+    
+    elif vibe == "negative":
+        empathy = {
+            "english": "😔 We understand this can be frustrating. ",
+            "tagalog": "😔 Naiintindihan namin na nakakainis minsan. "
+        }
+        help_offer = {
+            "english": "\n\n📞 Need help? Type 'help' for assistance!",
+            "tagalog": "\n\n📞 Kailangan ng tulong? I-type ang 'help'!"
+        }
+        return empathy.get(language, empathy["english"]) + reply + help_offer.get(language, help_offer["english"])
+    
+    return reply
+
+# === CONVERSATIONAL PHRASES (Simulates ML personality) ===
+CONVERSATIONAL_STARTERS = {
+    "english": [
+        "Great question! ",
+        "Ah, I see what you're asking. ",
+        "Happy to help with that! ",
+        "Let me explain clearly: ",
+        "Good news: ",
+        "Here's what you need to know: "
+    ],
+    "tagalog": [
+        "Magandang tanong! ",
+        "Naiintindihan ko ang itinatanong mo. ",
+        "Masaya kong tutulungan ka! ",
+        "Ipapaliwanag ko nang malinaw: ",
+        "Magandang balita: ",
+        "Eto ang kailangan mong malaman: "
+    ]
+}
+
+FOLLOW_UP_SUGGESTIONS = {
+    "kapitan_candidates": {
+        "english": "\n\n💡 Want to know about SK Chairman candidates next?",
+        "tagalog": "\n\n💡 Gusto mo bang malaman ang mga kandidato para sa SK Chairman susunod?"
+    },
+    "sk_candidates": {
+        "english": "\n\n💡 Ready to learn the voting process?",
+        "tagalog": "\n\n💡 Handa ka na bang matutunan ang proseso ng pagboto?"
+    },
+    "kagawad_candidates": {
+        "english": "\n\n💡 Need help understanding how to vote for multiple Kagawads?",
+        "tagalog": "\n\n💡 Kailangan mo ng tulong para maunawaan kung paano bumoto para sa maraming Kagawad?"
+    },
+    "eligibility": {
+        "english": "\n\n💡 Would you like to know how to register next?",
+        "tagalog": "\n\n💡 Gusto mo bang malaman kung paano magparehistro susunod?"
+    },
+    "voting_process": {
+        "english": "\n\n💡 Want to see candidate lists before election day?",
+        "tagalog": "\n\n💡 Gusto mo bang makita ang listahan ng mga kandidato bago ang araw ng halalan?"
+    }
+}
+
+# === KNOWLEDGE BASE ===
+CANDIDATES = {"Barangay Kapitan": [], "SK Chairman": [], "Kagawad": []}
+
+# Load candidates from CSV
+csv_path = os.path.join(os.path.dirname(__file__), "candidates.csv")
+
+try:
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            clean_row = {k.strip(): v.strip() for k, v in row.items()}
+            position = clean_row.get("Position", "")
+            name = clean_row.get("Candidate Name", "")
+            party = clean_row.get("Party", "")
+
+            if position == "Barangay Kapitan" and name:
+                CANDIDATES["Barangay Kapitan"].append({"name": name, "party": party})
+            elif position == "SK Chairman" and name:
+                CANDIDATES["SK Chairman"].append({"name": name, "party": party})
+            elif "kagawad" in position.lower() and name:
+                CANDIDATES["Kagawad"].append({"name": name, "party": party})
+    
+    print(f"✅ Loaded {len(CANDIDATES['Barangay Kapitan'])} Barangay Kapitan candidates")
+    print(f"✅ Loaded {len(CANDIDATES['SK Chairman'])} SK Chairman candidates")
+    print(f"✅ Loaded {len(CANDIDATES['Kagawad'])} Kagawad candidates (includes Barangay + SK)")
+
+except Exception as e:
+    print("❌ Error loading CSV:", e)
+    import traceback
+    traceback.print_exc()
+
+# === INTENT PATTERNS (English & Tagalog) ===
+INTENT_PATTERNS = [
+    # Greetings (English & Tagalog) - ALL VARIATIONS
+    (r'\b(hi|hello|hey|good (morning|afternoon|evening|day)|greetings|g\'day|yo|sup|what\'s up|wassup|hey there|hi there|howdy|how are you|kamusta|kumusta|magandang (umaga|tanghali|hapon|gabi)|kamusta ka|kumusta ka|musta|salamat|thank you|thanks|salamat po|salamat ka|hellooo|heyy|hey!|hi!|hello!|goodday|gday|greetings!|greetings,|hey there!|hi there!|howdy!|h3ll0|h3llo|h3l0|h3ll0|h3ll0|h3ll0|h3ll0|h3ll0|hiya|hey-hey|yo!|sup!|wassup!|what\'s up!|hola|bonjour|namaste|helloo|heyo|heyy|hey there|hi there|g\'day!|good day!|how are you?|kamusta ka?|kumusta ka?|musta?|salamat!|thank you!|thanks!|salamat po!|salamat ka!|h3ll0!|h3llo!|h3l0!|h3ll0!|h3ll0!|hiya!|hey-hey!|yo!|sup!|wassup!|what\'s up!|hola!|bonjour!|namaste!)\b', 'greeting', 1.0),
+    
+    # Candidates queries (English & Tagalog)
+    (r'\b(barangay kapitan|captain|barangay captain|kapitan)\b', 'kapitan_candidates', 0.9),
+    (r'\b(sino ang (mga )?kandidato|sino (mga )?tumatakbo|listahan ng kandidato)\b', 'all_candidates', 0.9),
+    (r'\b(sk chairman|sk captain|sangguniang kabataan|sk chairperson)\b', 'sk_candidates', 0.9),
+    (r'\b(kagawad|councilor|konsehal)\b', 'kagawad_candidates', 0.9),
+    (r'\b(all candidates|show all|list all|lahat ng kandidato)\b', 'all_candidates', 0.8),
+    (r'\b(sino|sinong|who are|who is)\b.*\b(kandidato|candidates|tumatakbo|running)\b', 'all_candidates', 0.8),
+    
+    # Voting process (English & Tagalog)
+    (r'\b(how to vote|voting process|how do i vote|how can i vote|paano (ako )?bumoto|paano ang pagboto|proseso ng pagboto|voting steps|steps to vote|hakbang sa pagboto|cast vote|submit vote|iboto|magboto|kumpletuhin ang boto|confirm vote)\b', 'voting_process', 1.0),
+    
+    # Eligibility (English & Tagalog)
+    (r'\b(eligible|can i vote|am i qualified|requirements|pwede ba ako bumoto|edad|age requirement|voter age|ilang taon|kwalipikado|qualified|karapat-dapat|kinakailangan|ano ang kailangan)\b', 'eligibility', 1.0),
+    
+    # Registration (English & Tagalog)
+    (r'\b(register|registration|sign up|magparehistro|pagrehistro|paano (mag)?register|how to register|saan magparehistro|voter id|id ng botante|voter\'s id)\b', 'registration', 0.9),
+    
+    # Blockchain/Security (English & Tagalog)
+    (r'\b(blockchain|secure|security|safe|ligtas|tamper|fraud|cheat|daya|pandaraya|protektado|protected|encrypted|secure ba|privacy|private|pribado|lihim)\b', 'security', 0.9),
+    
+    # Election info (English & Tagalog)
+    (r'\b(when|date|schedule|election day|kailan|kailan ang halalan|petsa ng halalan|schedule ng eleksyon|where to vote|voting location|precinct|saan boboto|lugar ng pagboto|online|internet|sa bahay)\b.*\b(vote|boto)\b', 'election_date', 0.8),
+    
+    # Results/Counting (English & Tagalog) - NEUTRAL responses only
+    (r'\b(results|tally|count|resulta|bilang|sino ang nanalo|who won|nag-lead|nangunguna|winning|prediction|who will win|forecast|manalo|real-time|live|realtime)\b', 'results_info', 0.9),
+    
+    # Voting rights & importance (English & Tagalog)
+    (r'\b(why vote|bakit bumoto|importance|kahalagahan|karapatan|rights|right to vote)\b', 'importance', 1.0),
+    
+    # Problems/Issues (English & Tagalog)
+    (r'\b(problema|problem|issue|error|hindi gumagana|not working|nakalimutan|forgot|password|voter id|nawala|lost|wala na)\b', 'technical_issue', 0.9),
+    
+    # Platform info (English & Tagalog)
+    (r'\b(ano ang|what is|how does|paano gumagana)\b.*\b(system|platform|blockchain|features|functionality|gamit|magagawa)\b', 'platform_info', 0.9),
+    
+    # Positions explanation (English & Tagalog)
+    (r'\b(ano ang|what is|tungkol sa)\b.*\b(kapitan|kagawad|sk chairman|role|tungkulin|responsibilidad|responsibility)\b', 'positions_info', 0.9),
+    
+    # Thank you (English & Tagalog)
+    (r'\b(thank you|thanks|salamat|maraming salamat|thank u|ty)\b', 'thanks', 1.0),
+    
+    # Goodbye (English & Tagalog)
+    (r'\b(bye|goodbye|exit|quit|paalam|sige na)\b', 'goodbye', 1.0),
+    
+    # Help (English & Tagalog)
+    (r'\b(help|what can you do|commands|tulong|ano kaya mong gawin)\b', 'help', 1.0),
+]
+
+# === RESPONSE TEMPLATES (Bilingual + Conversational) ===
+RESPONSES = {
+    'greeting': [
+        "✨ Hello there! I'm Mayombo's AI Election Assistant. I'm here to help with anything related to the upcoming barangay election.\n\nWhat would you like to know? You can ask about:\n• Candidate information\n• Voting process\n• Eligibility requirements\n• Election security\n\nJust type 'help' for a full list of what I can do! 😊",
+        
+        "🌟 Hi! I'm your friendly neighborhood election assistant. Ready to help you navigate the Mayombo barangay election.\n\nHow can I assist you today? You can:\n• Check candidate lists\n• Learn how to vote\n• Verify eligibility\n• Understand security features\n\nAsk away! I'm here to help. 🗳️",
+        
+        "👋 Hey! Mayombo Election Assistant here. I'm all set to help you with the barangay election.\n\nWhether you need candidate info, voting steps, or eligibility details—I've got you covered!\n\nWhat would you like to know? Just ask! 💬",
+        
+        "😊 Hello! I'm your go-to for all things Mayombo election. Need help with candidates, voting process, or anything else?\n\nI'm here to make your election experience smooth and stress-free. What would you like to know? 🗳️",
+        
+        "👋 Hi there! Ready to dive into the Mayombo barangay election? I'm here to help with:\n• Candidate information\n• Voting procedures\n• Eligibility requirements\n• Security features\n\nJust ask me anything—I'm all ears! 💬"
+    ],
+    
+    'voting_process': [
+        "**Paano Bumoto sa Mayombo:**\n\n1️⃣ Mag-log in gamit ang iyong Voter ID at Petsa ng Kapanganakan\n2️⃣ I-verify ang iyong pagkakakilanlan\n3️⃣ Piliin ang iyong mga kandidato\n4️⃣ I-review ang iyong mga pinili\n5️⃣ I-confirm at i-submit ang boto\n\n💡 Tandaan: Isang beses lang ang pagboto at hindi na mababago pagkatapos i-submit!",
+        "**How to Vote in Mayombo:**\n\n1️⃣ Log in with your Voter ID and Date of Birth\n2️⃣ Verify your identity\n3️⃣ Select your preferred candidates\n4️⃣ Review your choices\n5️⃣ Confirm and submit your vote\n\n💡 Remember: You can only vote once and cannot change after submission!",
+    ],
+    
+    'eligibility': [
+        "**Kinakailangan para Bumoto:**\n\n✅ **Para sa SK Election:**\n• Edad: 15-30 taong gulang\n• Nakarehisto bilang SK voter sa Mayombo\n\n✅ **Para sa Barangay Election:**\n• Edad: 18 taong gulang pataas\n• Nakarehisto bilang botante sa Mayombo\n• Pilipinong mamamayan\n\nSiguraduhing nakarehisto ka na bago ang araw ng halalan!",
+        "**Voter Eligibility Requirements:**\n\n✅ **For SK Election:**\n• Age: 15-30 years old\n• Registered as SK voter in Mayombo\n\n✅ **For Barangay Election:**\n• Age: 18 years old and above\n• Registered voter in Mayombo\n• Filipino citizen\n\nMake sure you're registered before election day!",
+    ],
+    
+    'registration': [
+        "**Paano Magparehistro bilang Botante:**\n\n📝 **Mga Kakailanganin:**\n• Valid ID (School ID, Birth Certificate, etc.)\n• Proof of residency sa Mayombo\n• Application form\n\n📍 **Saan magparehistro:**\nPunta sa Office of the Barangay sa Mayombo\n\n⏰ **Kailan:**\nTingnan ang opisyal na schedule ng COMELEC\n\n💡 **Para sa online registration**, maghintay ng announcement mula sa barangay!",
+        "**How to Register as a Voter:**\n\n📝 **Requirements:**\n• Valid ID (School ID, Birth Certificate, etc.)\n• Proof of residency in Mayombo\n• Application form\n\n📍 **Where to register:**\nVisit the Barangay Office in Mayombo\n\n⏰ **When:**\nCheck the official COMELEC schedule\n\n💡 **For online registration**, wait for official announcement from the barangay!",
+    ],
+    
+    'security': [
+        "**Seguridad ng Eleksyon:**\n\n🔒 **Blockchain Technology**: Bawat boto ay naka-record sa blockchain ledger na hindi mababago\n\n🔐 **Encryption**: Ang iyong boto ay naka-encrypt end-to-end\n\n✅ **Verification**: Mave-verify ang bawat boto nang hindi nalalaman kung sino bumoto\n\n🚫 **Tamper-Proof**: Kapag nai-record na, hindi na mababago o matatanggal ang boto\n\n🛡️ **Transparent**: Makikita ang bilang ng mga boto pero hindi ang identity ng bumoto\n\nLigtas at secure ang iyong boto!",
+        "**Election Security Features:**\n\n🔒 **Blockchain Technology**: Every vote is recorded on an immutable blockchain ledger\n\n🔐 **Encryption**: Your vote is encrypted end-to-end\n\n✅ **Verification**: Each vote can be verified without revealing voter identity\n\n🚫 **Tamper-Proof**: Once recorded, votes cannot be altered or deleted\n\n🛡️ **Transparent**: Vote counts are visible but voter identity remains private\n\nYour vote is safe and secure!",
+    ],
+    
+    'privacy': [
+        "**Privacy at Confidentiality:**\n\n🔒 Ang iyong boto ay **100% lihim**\n\n✅ Walang makakakita kung sino ang binoto mo\n\n🛡️ Ang sistema ay hindi nag-store ng koneksyon sa pagitan ng voter at kandidato\n\n📊 Makikita lang ang kabuuang bilang ng boto, hindi individual votes\n\nAng iyong privacy ay protektado!",
+    ],
+    
+    'election_date': [
+        "**Petsa ng Halalan:**\n\n📅 Ang Mayombo Barangay Election ay susundin ang schedule ng COMELEC.\n\n🕒 Para sa eksaktong petsa at oras, mangyaring magtanong sa inyong local election office.\n\n📢 Abangan ang opisyal na pag-announce!\n\n💡 **Tip**: I-save ang petsa sa iyong calendar para hindi makalimutan!",
+        "**Election Schedule:**\n\n📅 The Mayombo Barangay Election follows the COMELEC schedule.\n\n🕒 For the exact date and time, please check with your local election office.\n\n📢 Stay tuned for official announcements!\n\n💡 **Tip**: Save the date on your calendar so you won't forget!",
+    ],
+    
+    'voting_location': [
+        "**Saan Boboto:**\n\n💻 **Online Voting**: Pwede kang bumoto online through this secure platform kahit saan ka naroroon basta may internet!\n\n🏢 **In-Person** (kung available): Tingnan ang iyong voter registration para sa assigned precinct mo sa Barangay Mayombo.\n\n📱 Mas convenient ang online voting - boto ka kahit nasa bahay!",
+        "**Where to Vote:**\n\n💻 **Online Voting**: You can vote online through this secure platform from anywhere with internet access!\n\n🏢 **In-Person** (if available): Check your voter registration for your assigned precinct in Barangay Mayombo.\n\n📱 Online voting is more convenient - vote from the comfort of your home!",
+    ],
+    
+    'online_voting': [
+        "**Online Voting:**\n\n✅ **Pwede ka bumoto online!**\n\n📱 Mga device na pwede gamitin:\n• Computer/Laptop\n• Tablet\n• Smartphone\n\n🌐 Kailangan lang ng stable internet connection\n\n🔒 Ligtas at secure ang online voting dahil sa blockchain technology\n\n💡 Vote kahit saan ka - sa bahay, opisina, o kahit nasaan!",
+    ],
+    
+    'results_info': [  # NEUTRAL - no predictions/counts
+        "🗳️ **Tungkol sa Resulta ng Halalan:**\n\nAng opisyal na resulta ay ipapahayag pagkatapos ng voting period ayon sa schedule ng COMELEC.\n\n🔍 Ang sistema ay transparent at verifiable - maaari mong i-verify ang proseso ng pagbilang.\n\n💡 Para sa opisyal na resulta, mangyaring maghintay ng announcement mula sa inyong Barangay Captain at COMELEC.",
+        "🗳️ **About Election Results:**\n\nOfficial results will be announced after the voting period closes, following COMELEC schedule.\n\n🔍 The system is transparent and verifiable - you can verify the counting process.\n\n💡 For official results, please wait for announcements from your Barangay Captain and COMELEC.",
+    ],
+    
+    'importance': [
+        "**Bakit Mahalaga ang Pagboto:**\n\n🗳️ **Karapatan mo ito** - Ito ay constitutional right ng bawat mamamayan\n\n🏘️ **Makakaapekto sa barangay** - Ang mga napipili mo ay maglilingkod sa inyong komunidad\n\n💪 **Iyong tinig** - Ang boto mo ay ang paraan para marinig ka\n\n👥 **Accountability** - Pipiliin mo ang mga responsableng lider\n\n🌟 **Pagbabago** - Nagsisimula sa local governance ang tunay na pagbabago\n\nAng iyong boto ay may kapangyarihan!",
+    ],
+    
+    'voting_rights': [
+        "**Karapatan sa Pagboto:**\n\n✅ Bawat qualified citizen ay may karapatang bumoto\n✅ Walang pwedeng pumigil sa iyo na bumoto\n✅ Ang iyong boto ay lihim at protektado\n✅ Hindi ka pwedeng pilitin kung sino iboboto\n✅ Pantay-pantay ang lahat ng boto\n\n🛡️ Ang mga karapatan mo ay protektado ng Konstitusyon at batas!",
+    ],
+    
+    'technical_issue': [
+        "**May Problema sa Sistema?**\n\n🔧 Subukan ang mga sumusunod:\n\n1️⃣ I-refresh ang page (F5)\n2️⃣ I-clear ang browser cache\n3️⃣ Gumamit ng updated browser\n4️⃣ I-check ang internet connection\n\n📞 **Kung patuloy ang problema:**\nMakipag-ugnayan sa technical support:\n• Email: support@mayombo-voting.ph\n• Hotline: (Available during election period)\n\n💡 Mag-screenshot ng error para mas mabilis masolusyunan!",
+    ],
+    
+    'forgot_credentials': [
+        "**Nakalimutan ang Voter ID o Password?**\n\n🔑 **Para sa Voter ID:**\n• Tingnan ang iyong voter registration certificate\n• Contact ang Barangay Office\n• Dalhin ang valid ID para ma-verify\n\n🔐 **Para sa Password:**\n• I-click ang 'Forgot Password' sa login page\n• Susundin ang instructions na ipapadala sa registered email/phone\n\n📞 **Kailangan ng tulong:**\nPumunta sa Barangay Office na may dalang valid ID\n\n💡 I-save ang credentials mo sa safe place!",
+    ],
+    
+    'platform_info': [
+        "**Tungkol sa Mayombo Voting Platform:**\n\n🌐 Ito ay secure, blockchain-based voting system\n\n✨ **Features:**\n• End-to-end encryption\n• Real-time vote counting\n• Tamper-proof records\n• Anonymous voting\n• Accessible kahit saan\n\n🔒 Gumagamit ng latest technology para sa:\n• Security\n• Transparency\n• Convenience\n• Accuracy\n\nModernong paraan ng pagboto para sa Mayombo!",
+    ],
+    
+    'features': [
+        "**Ano ang Magagawa ng Platform:**\n\n✅ Tingnan ang mga kandidato\n✅ Bumoto ng secure at private\n✅ I-verify ang iyong boto\n✅ Makita ang real-time results\n✅ View election statistics\n✅ Makatanggap ng notifications\n✅ Access voter education materials\n\n📱 User-friendly interface\n🔒 Maximum security\n⚡ Fast at efficient\n\nLahat ng kailangan mo para sa democratic participation!",
+    ],
+    
+    'positions_info': [
+        "**Mga Posisyon sa Barangay Election:**\n\n👔 **Barangay Kapitan**\n• Pinuno ng barangay\n• Namamahala sa day-to-day operations\n• Nag-implement ng programs at policies\n\n👥 **Barangay Kagawad** (Councilors)\n• Miyembro ng Sangguniang Barangay\n• Tumutulong sa pagpapasa ng ordinansa\n• May specific committees\n\n🎓 **SK Chairman**\n• Pinuno ng Sangguniang Kabataan\n• Nag-represent sa kabataan (15-30 years old)\n• Nag-organize ng youth programs\n\nLahat ay may mahalagang papel sa barangay!",
+    ],
+    
+    'thanks': [
+        "Walang anuman! 😊\n\nMay iba ka pang tanong? Nandito lang ako para tumulong!\n\n🗳️ Huwag kalimutang bumoto!",
+        "You're welcome! 😊\n\nDo you have any other questions? I'm here to help!\n\n🗳️ Don't forget to vote!",
+        "Salamat sa pagtanong! May matutulungan pa ba ako?",
+    ],
+    
+    'goodbye': [
+        "Paalam! Salamat sa pagbisita. 👋\n\n🗳️ Tandaan: Ang iyong boto ay mahalaga!\n\nHanggang sa muli!",
+        "Goodbye! Thanks for visiting. 👋\n\n🗳️ Remember: Your vote matters!\n\nSee you again!",
+        "Sige, ingat! Bumoto ka ha! 🗳️😊",
+    ],
+    
+    'help': [
+        "**Matutulungan kita sa mga sumusunod:**\n\n📋 **Kandidato**\n• Sino ang tumatakbo?\n• Partido ng kandidato\n• Lahat ng kandidato\n\n🗳️ **Pagboto**\n• Paano bumoto?\n• Saan boboto?\n• Kailan ang halalan?\n\n✅ **Eligibility**\n• Pwede ba ako bumoto?\n• Ano ang requirements?\n\n🔒 **Seguridad**\n• Gaano ka-secure?\n• Ano ang blockchain?\n\n💡 **Subukan:**\n• \"Sino ang kandidato para sa kapitan?\"\n• \"Paano ako boboto?\"\n• \"Pwede ba akong bumoto?\"\n• \"Gaano kasecure ang election?\"\n• \"Kailan ang halalan?\"\n\nType 'help' anytime kung kailangan mo ng tulong!",
+        "**I can help you with:**\n\n📋 **Candidates**\n• Who are running?\n• Candidate's party\n• All candidates\n\n🗳️ **Voting**\n• How to vote?\n• Where to vote?\n• When is the election?\n\n✅ **Eligibility**\n• Can I vote?\n• What are the requirements?\n\n🔒 **Security**\n• How secure is it?\n• What is blockchain?\n\n💡 **Try asking:**\n• \"Who are the barangay kapitan candidates?\"\n• \"How do I vote?\"\n• \"Am I eligible to vote?\"\n• \"How secure is this election?\"\n• \"When is the election?\"\n\nType 'help' anytime you need assistance!",
+    ],
+    
+    'unknown': [
+        "Hindi ko masyadong naintindihan ang iyong tanong. 🤔\n\nPwede mo bang ulitin o gawing mas malinaw?\n\n💡 **Pwede mong itanong ang tungkol sa:**\n• Kandidato\n• Proseso ng pagboto\n• Kinakailangan para bumoto\n• Seguridad ng eleksyon\n\nI-type ang 'help' para makita ang buong listahan!",
+        "I'm not sure I understood that. 🤔\n\nCould you rephrase your question?\n\n💡 **You can ask me about:**\n• Candidates\n• Voting process\n• Eligibility\n• Election security\n\nType 'help' to see what I can do!",
+        "Pasensya na, hindi ko naintindihan. Pwede bang mas specific? Type 'help' para sa mga sample questions! 😊",
+    ]
+}
+
+class ChatMessage(BaseModel):
+    message: str
+
+def detect_intent(message: str) -> Tuple[str, float]:
+    """Detect user intent using pattern matching"""
+    message = message.lower().strip()
+    
+    best_intent = 'unknown'
+    best_score = 0.0
+    
+    for pattern, intent, base_score in INTENT_PATTERNS:
+        if re.search(pattern, message, re.IGNORECASE):
+            if base_score > best_score:
+                best_score = base_score
+                best_intent = intent
+    
+    return best_intent, best_score
+
+def format_candidates(position: str) -> str:
+    """Format candidate list for display"""
+    if not CANDIDATES.get(position):
+        return f"Walang nahanap na kandidato para sa {position} sa database."
+    
+    tagalog_positions = {
+        "Barangay Kapitan": "Barangay Kapitan",
+        "SK Chairman": "SK Chairman",
+        "Kagawad": "Kagawad"
+    }
+    
+    candidates_list = [f"• {c['name']} ({c['party']})" for c in CANDIDATES[position]]
+    
+    header = f"**Mga Kandidato para sa {tagalog_positions.get(position, position)}:**\n\n"
+    candidates_text = "\n".join(candidates_list)
+    footer = f"\n\n📊 Kabuuang kandidato: {len(CANDIDATES[position])}"
+    
+    return header + candidates_text + footer
+
+def get_candidate_info(message: str) -> str:
+    """Extract specific candidate name from message"""
+    message_lower = message.lower()
+    
+    for position, candidates in CANDIDATES.items():
+        for candidate in candidates:
+            if candidate['name'].lower() in message_lower:
+                return f"**{candidate['name']}**\n\nPosisyon: {position}\nPartido: {candidate['party']}\n\n🎯 Good luck sa lahat ng mga kandidato!\n\nMay iba ka pang gustong malaman tungkol sa kandidatong ito?"
+    
+    return None
+
+def detect_language(message: str) -> str:
+    """Improved language detection (English vs Tagalog)"""
+    msg_lower = message.lower().strip()
+    
+    # Strong English indicators (prioritize these)
+    english_indicators = ['thank', 'thanks', 'you ', 'your ', 'how to', 'can i', 'what is', 'where ', 'when ', 'who ', 'vote', 'candidates', 'eligible', 'register']
+    english_score = sum(1 for word in english_indicators if word in msg_lower)
+    
+    # Strong Tagalog indicators
+    tagalog_indicators = ['ang ', 'ng ', 'sa ', 'mga ', 'ko ', 'mo ', 'ano ', 'sino ', 'paano ', 'salamat', 'boto', 'kandidato', 'bumoto', 'pagboto']
+    tagalog_score = sum(1 for word in tagalog_indicators if word in msg_lower)
+    
+    # Decision logic
+    if english_score > tagalog_score:
+        return 'english'
+    elif tagalog_score > 0:
+        return 'tagalog'
+    else:
+        # Default to English for neutral/ambiguous messages
+        return 'english'
+
+def clean_response(intent: str, text: str) -> str:
+    """Remove headers that repeat the user's question"""
+    INTENT_HEADERS = {
+        "voting_process": ["paano bumoto", "how to vote", "voting process", "hakbang sa pagboto"],
+        "eligibility": ["kinakailangan para bumoto", "voter eligibility"],
+        "registration": ["paano magparehistro", "how to register"]
+    }
+
+    if intent in INTENT_HEADERS:
+        for header in INTENT_HEADERS[intent]:
+            text = re.sub(rf"\*\*.*{header}.*?\*\*\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(rf".*{header}.*:\s*", "", text, flags=re.IGNORECASE)
+
+    return text.strip()
+
+def add_conversational_flair(reply: str, intent: str, language: str) -> str:
+    """Add natural conversation flow (simulates ML personality)"""
+    # Add starter phrase for non-greeting intents
+    if intent not in ['greeting', 'thanks', 'goodbye', 'unknown']:
+        starter = random.choice(CONVERSATIONAL_STARTERS.get(language, CONVERSATIONAL_STARTERS["english"]))
+        reply = starter + reply
+    
+    # Add follow-up suggestion for key intents
+    if intent in FOLLOW_UP_SUGGESTIONS:
+        suggestion = FOLLOW_UP_SUGGESTIONS[intent].get(language, FOLLOW_UP_SUGGESTIONS[intent]["english"])
+        reply += suggestion
+    
+    # Special handling for greetings
+    elif intent == 'greeting':
+        # Add a warm, human-like closing to greetings
+        closing = random.choice([
+            "\n\nWhat would you like to know about the election?",
+            "\n\nHow can I help you today?",
+            "\n\nAsk me anything about the Mayombo election!",
+            "\n\nReady to make your voice heard? 💬",
+            "\n\nI'm here to help with anything election-related!"
+        ])
+        reply += closing
+    
+    return reply
+
+def apply_conversational_logic(user_msg: str, intent: str, lang: str, session: dict) -> str:
+    """Handle conversational follow-ups and context"""
+    if intent == 'unknown':
+        last_intent = session.get("last_intent")
+        last_position = session.get("last_position")
+        
+        # Handle "and for SK?" type follow-ups
+        if last_intent in ['kapitan_candidates', 'kagawad_candidates'] and re.search(r'\b(sk|sangguniang kabataan)\b', user_msg, re.IGNORECASE):
+            return 'sk_candidates'
+        elif last_intent == 'sk_candidates' and re.search(r'\b(kapitan|barangay captain)\b', user_msg, re.IGNORECASE):
+            return 'kapitan_candidates'
+        elif last_intent in ['kapitan_candidates', 'sk_candidates'] and re.search(r'\b(kagawad|councilor)\b', user_msg, re.IGNORECASE):
+            return 'kagawad_candidates'
+    
+    return intent
+
+@app.post("/chat")
+async def chat(msg: ChatMessage, request: Request):
+    user_msg = msg.message.strip()
+    
+    if not user_msg:
+        return {"reply": "Walang mensahe. Ano ang gusto mong itanong? 😊"}
+    
+    # Get user session for context awareness
+    session = get_user_session(request)
+    
+    # Detect intent and language
+    intent, confidence = detect_intent(user_msg)
+    lang = detect_language(user_msg)
+    vibe = detect_vibe(user_msg, lang)
+    
+    # Apply conversational context logic
+    intent = apply_conversational_logic(user_msg, intent, lang, session)
+    
+    # Handle candidate-specific queries
+    if intent == 'kapitan_candidates':
+        reply = format_candidates("Barangay Kapitan")
+        reply = add_conversational_flair(reply, intent, lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, intent, "Barangay Kapitan")
+        return {"reply": reply}
+    
+    elif intent == 'sk_candidates':
+        reply = format_candidates("SK Chairman")
+        reply = add_conversational_flair(reply, intent, lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, intent, "SK Chairman")
+        return {"reply": reply}
+    
+    elif intent == 'kagawad_candidates':
+        reply = format_candidates("Kagawad")
+        reply = add_conversational_flair(reply, intent, lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, intent, "Kagawad")
+        return {"reply": reply}
+    
+    elif intent == 'all_candidates':
+        reply = "**Lahat ng Kandidato / All Candidates:**\n\n"
+        for position in ["Barangay Kapitan", "SK Chairman", "Kagawad"]:
+            reply += format_candidates(position) + "\n\n"
+        reply += "🗳️ Piliin nang mabuti! Choose wisely!"
+        reply = add_conversational_flair(reply, intent, lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, intent)
+        return {"reply": reply.strip()}
+    
+    # Check if asking about specific candidate
+    candidate_info = get_candidate_info(user_msg)
+    if candidate_info:
+        reply = candidate_info
+        reply = add_conversational_flair(reply, 'candidate_detail', lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, 'candidate_detail')
+        return {"reply": reply}
+    
+    # Handle general intents (voting_process, eligibility, etc.)
+    if intent in RESPONSES:
+        responses = RESPONSES[intent]
+        
+        # Filter responses by detected language
+        if lang == 'tagalog':
+            # Prefer responses with Tagalog markers
+            filtered = [r for r in responses if any(word in r.lower() for word in ['ang ', 'mga ', ' sa ', ' ng ', 'boto', 'kandidato', 'pagboto', 'botante'])]
+        else:  # english
+            # Prefer responses WITHOUT strong Tagalog markers
+            filtered = [r for r in responses if not any(marker in r.lower() for marker in [' ang ', ' mga ', ' sa ', ' ng '])]
+        
+        # Use filtered responses if available, else fallback
+        reply = random.choice(filtered) if filtered else random.choice(responses)
+        
+        reply = clean_response(intent, reply)
+        reply = add_conversational_flair(reply, intent, lang)
+        reply = apply_vibe_to_response(reply, vibe, lang)
+        update_session(session, user_msg, intent)
+        return {"reply": reply}
+    
+    # Default unknown response
+    unknown_responses = RESPONSES['unknown']
+    # Prefer Tagalog for unknown if user used Tagalog
+    if lang == 'tagalog':
+        reply = unknown_responses[0]
+    else:
+        reply = random.choice(unknown_responses)
+    
+    reply = clean_response('unknown', reply)
+    reply = add_conversational_flair(reply, 'unknown', lang)
+    reply = apply_vibe_to_response(reply, vibe, lang)
+    update_session(session, user_msg, 'unknown')
+    return {"reply": reply}
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Mayombo AI Assistant is running! / Gumagana ang Mayombo AI Assistant!",
+        "status": "online",
+        "version": "4.0 - Conversational Edition"
+    }
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "candidates_loaded": sum(len(v) for v in CANDIDATES.values()),
+        "total_kapitan": len(CANDIDATES["Barangay Kapitan"]),
+        "total_sk": len(CANDIDATES["SK Chairman"]),
+        "total_kagawad": len(CANDIDATES["Kagawad"]),
+        "language_support": ["English", "Tagalog"],
+        "vibe_detection": "enabled",
+        "conversational_ai": "enabled"
+    }
+
+@app.get("/stats")
+async def stats():
+    """Get chatbot statistics"""
+    return {
+        "total_intents": len(set(intent for _, intent, _ in INTENT_PATTERNS)),
+        "total_patterns": len(INTENT_PATTERNS),
+        "supported_languages": ["English", "Tagalog"],
+        "total_candidates": sum(len(v) for v in CANDIDATES.values()),
+        "positions": list(CANDIDATES.keys()),
+        "vibe_aware": True,
+        "context_aware": True
+    }

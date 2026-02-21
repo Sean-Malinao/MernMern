@@ -1,0 +1,31 @@
+text,label
+thank you,positive
+thanks,positive
+awesome,positive
+nice,positive
+cool,positive
+love this,positive
+helpful,positive
+smooth,positive
+perfect,positive
+great job,positive
+don't get it,negative
+hard,negative
+error,negative
+why,negative
+damn,negative
+annoying,negative
+broken,negative
+frustrating,negative
+help me,negative
+can't find,negative
+who are candidates,neutral
+how to vote,neutral
+can i vote,neutral
+requirements,neutral
+where to vote,neutral
+list candidates,neutral
+explain,neutral
+tell me,neutral
+is this legit,neutral
+trusted,neutral
